@@ -17,11 +17,15 @@ with open("config.json") as f:
 ESP32_CAM_IP      = config.get("esp32cam_ip")
 ESP32_CAM_STREAM  = config.get("esp32cam_port_stream")
 ESP32_CAM_CONTROL = config.get("esp32cam_port_control")
-MOSTRAR_VIDEO    = config.get("mostrar_video", False)
+MOSTRAR_VIDEO     = config.get("mostrar_video", False)
+USE_WEBCAM        = config.get("use_webcam", False)
 
-print(f"[CONFIG] IP: {ESP32_CAM_IP} | Stream: {ESP32_CAM_STREAM} | Control: {ESP32_CAM_CONTROL}")
-
-cap = cv2.VideoCapture(f"http://{ESP32_CAM_IP}:{ESP32_CAM_STREAM}/stream")
+if USE_WEBCAM:
+    print("[CONFIG] Modo webcam local")
+    cap = cv2.VideoCapture(0)
+else:
+    print(f"[CONFIG] IP: {ESP32_CAM_IP} | Stream: {ESP32_CAM_STREAM} | Control: {ESP32_CAM_CONTROL}")
+    cap = cv2.VideoCapture(f"http://{ESP32_CAM_IP}:{ESP32_CAM_STREAM}/stream")
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -94,7 +98,8 @@ def nivel_sospecha(zona, tiempo):
     return 0
 
 def set_flash(encendido):
-    """Cambia el flash solo si el estado es diferente al actual."""
+    if USE_WEBCAM:
+        return
     global flash_activo
     if encendido == flash_activo:
         return
@@ -109,6 +114,10 @@ def set_flash(encendido):
 def tomar_foto(frame, track_id, zona, nivel):
     ts   = time.strftime("%Y%m%d_%H%M%S")
     path = f"evidencia/ID{track_id}_{zona}_N{nivel}_{ts}.jpg"
+    if USE_WEBCAM:
+        cv2.imwrite(path, frame)
+        print(f"[FOTO WEBCAM] {path}")
+        return path
     try:
         response = requests.get(f"http://{ESP32_CAM_IP}/capture", timeout=5)
         if response.status_code == 200:
