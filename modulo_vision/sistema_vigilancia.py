@@ -44,13 +44,18 @@ _ae_level_actual  = 0
 _frame_expo       = 0
 
 def _ctrl(var, val):
-    try:
-        requests.get(
-            f"http://{ESP32_CAM_IP}/control?var={var}&val={val}",
-            timeout=2
-        )
-    except Exception as e:
-        print(f"[CTRL ERROR] {var}={val} — {e}")
+    """Envía comando al ESP32-CAM en hilo background — nunca bloquea el loop."""
+    if USE_WEBCAM:
+        return
+    def _send():
+        try:
+            requests.get(
+                f"http://{ESP32_CAM_IP}/control?var={var}&val={val}",
+                timeout=1
+            )
+        except Exception:
+            pass
+    threading.Thread(target=_send, daemon=True).start()
 
 def configurar_camara():
     if USE_WEBCAM or not CFG_CAMARA:
@@ -151,33 +156,29 @@ def set_flash(encendido):
     global flash_activo
     if encendido == flash_activo:
         return
-    val = 1 if encendido else 0
-    try:
-        requests.get(f"http://{ESP32_CAM_IP}/control?var=flash&val={val}", timeout=2)
-        flash_activo = encendido
-        print(f"[FLASH] {'ON' if encendido else 'OFF'}")
-    except Exception as e:
-        print(f"[FLASH ERROR] {e}")
+    flash_activo = encendido  # actualizar estado local antes del envío async
+    print(f"[FLASH] {'ON' if encendido else 'OFF'}")
+    _ctrl("flash", 1 if encendido else 0)
 
 def tomar_foto(frame, track_id, zona, nivel):
     ts   = time.strftime("%Y%m%d_%H%M%S")
     path = f"evidencia/ID{track_id}_{zona}_N{nivel}_{ts}.jpg"
+    # Guardar frame actual inmediatamente — no bloquea el loop
+    cv2.imwrite(path, frame)
+    print(f"[FOTO] Evidencia guardada: {path}")
     if USE_WEBCAM:
-        cv2.imwrite(path, frame)
-        print(f"[FOTO WEBCAM] {path}")
         return path
-    try:
-        response = requests.get(f"http://{ESP32_CAM_IP}/capture", timeout=15)
-        if response.status_code == 200:
-            with open(path, "wb") as f:
-                f.write(response.content)
-            print(f"[FOTO ESP32-CAM] {path}")
-        else:
-            cv2.imwrite(path, frame)
-            print(f"[FOTO FALLBACK] {path}")
-    except Exception as e:
-        cv2.imwrite(path, frame)
-        print(f"[FOTO FALLBACK] {path} — {e}")
+    # Intentar reemplazar con foto de mayor resolución del ESP32 en background
+    def _fetch():
+        try:
+            r = requests.get(f"http://{ESP32_CAM_IP}/capture", timeout=15)
+            if r.status_code == 200:
+                with open(path, "wb") as f:
+                    f.write(r.content)
+                print(f"[FOTO ESP32-CAM] {path} actualizada en alta resolución")
+        except Exception as e:
+            print(f"[FOTO] ESP32 no disponible — usando frame local ({e})")
+    threading.Thread(target=_fetch, daemon=True).start()
     return path
 
 def _hora():
