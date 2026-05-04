@@ -54,16 +54,23 @@ void initCamera() {
   config.pin_reset    = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size   = FRAMESIZE_VGA;   // 640x480 — suficiente para el stream
-  config.jpeg_quality = 12;
+  // Alojar buffers DMA para UXGA desde el inicio usando PSRAM
+  // Así el cambio a UXGA en /capture no desborda los buffers (FB-OVF)
+  config.frame_size   = FRAMESIZE_UXGA;
+  config.jpeg_quality = 10;
   config.fb_count     = 2;
+  config.fb_location  = CAMERA_FB_IN_PSRAM;
 
   if (esp_camera_init(&config) != ESP_OK) {
     Serial.println("[ERROR] Camera init falló — reiniciando en 3s");
     delay(3000);
     ESP.restart();
   }
-  Serial.println("[OK] Cámara inicializada en VGA");
+
+  // Correr el stream en VGA — los buffers ya son suficientemente grandes
+  sensor_t *s = esp_camera_sensor_get();
+  s->set_framesize(s, FRAMESIZE_VGA);
+  Serial.println("[OK] Cámara inicializada — buffers UXGA, stream VGA");
 }
 
 // ── Stream ────────────────────────────────────────────────────────
@@ -114,6 +121,7 @@ esp_err_t captureHandler(httpd_req_t *req) {
   // Solo captura — flash lo maneja Python
   camera_fb_t *fb = esp_camera_fb_get();
   s->set_framesize(s, FRAMESIZE_VGA);
+  delay(200);  // dar tiempo al DMA para ajustarse de vuelta a VGA
 
   if (!fb) { httpd_resp_send_500(req); return ESP_FAIL; }
 
