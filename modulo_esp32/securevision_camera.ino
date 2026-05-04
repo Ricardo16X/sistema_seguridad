@@ -138,12 +138,18 @@ esp_err_t controlHandler(httpd_req_t *req) {
   sensor_t *s   = esp_camera_sensor_get();
   int       ival = atoi(val);
 
-  if      (!strcmp(var, "framesize"))  s->set_framesize(s, (framesize_t)ival);
-  else if (!strcmp(var, "quality"))    s->set_quality(s, ival);
-  else if (!strcmp(var, "brightness")) s->set_brightness(s, ival);
-  else if (!strcmp(var, "contrast"))   s->set_contrast(s, ival);
-  else if (!strcmp(var, "saturation")) s->set_saturation(s, ival);
-  else if (!strcmp(var, "flash"))      digitalWrite(FLASH_PIN, ival ? HIGH : LOW);
+  if      (!strcmp(var, "framesize"))   s->set_framesize(s, (framesize_t)ival);
+  else if (!strcmp(var, "quality"))     s->set_quality(s, ival);
+  else if (!strcmp(var, "brightness"))  s->set_brightness(s, ival);
+  else if (!strcmp(var, "contrast"))    s->set_contrast(s, ival);
+  else if (!strcmp(var, "saturation"))  s->set_saturation(s, ival);
+  else if (!strcmp(var, "flash"))       digitalWrite(FLASH_PIN, ival ? HIGH : LOW);
+  // ── Controles de exposición — usados por el bucle automático de Python
+  else if (!strcmp(var, "ae_level"))    s->set_ae_level(s, ival);      // sesgo AEC (-2..+2)
+  else if (!strcmp(var, "aec"))         s->set_exposure_ctrl(s, ival); // AEC on/off
+  else if (!strcmp(var, "agc"))         s->set_gain_ctrl(s, ival);     // AGC on/off
+  else if (!strcmp(var, "aec_value"))   s->set_aec_value(s, ival);     // exposición manual (0-1200)
+  else if (!strcmp(var, "gainceiling")) s->set_gainceiling(s, (gainceiling_t)ival); // techo de ganancia
   else if (!strcmp(var, "reset")) {
     WiFiManager wm;
     wm.resetSettings();

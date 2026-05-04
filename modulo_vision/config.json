@@ -3,5 +3,20 @@
   "esp32cam_port_stream": 81,
   "esp32cam_port_control": 80,
   "mostrar_video": true,
-  "use_webcam": true
+  "use_webcam": true,
+
+  "camara_inicio": {
+    "quality": 10,
+    "contrast": 1,
+    "saturation": 0,
+    "ae_level": 0,
+    "gainceiling": 2
+  },
+
+  "exposicion_auto": {
+    "activo": true,
+    "brillo_objetivo": 130,
+    "zona_muerta": 25,
+    "intervalo_frames": 30
+  }
 }

@@ -19,6 +19,8 @@ ESP32_CAM_STREAM  = config.get("esp32cam_port_stream")
 ESP32_CAM_CONTROL = config.get("esp32cam_port_control")
 MOSTRAR_VIDEO     = config.get("mostrar_video", False)
 USE_WEBCAM        = config.get("use_webcam", False)
+CFG_CAMARA        = config.get("camara_inicio", {})
+CFG_EXPO          = config.get("exposicion_auto", {})
 
 if USE_WEBCAM:
     print("[CONFIG] Modo webcam local")
@@ -31,6 +33,52 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
 os.makedirs("evidencia", exist_ok=True)
+
+# ── Exposición automática ─────────────────────────────────────────
+_BRILLO_OBJETIVO  = CFG_EXPO.get("brillo_objetivo", 130)
+_ZONA_MUERTA      = CFG_EXPO.get("zona_muerta", 25)
+_EXPO_INTERVALO   = CFG_EXPO.get("intervalo_frames", 30)
+_EXPO_ACTIVO      = CFG_EXPO.get("activo", True)
+
+_ae_level_actual  = 0
+_frame_expo       = 0
+
+def _ctrl(var, val):
+    try:
+        requests.get(
+            f"http://{ESP32_CAM_IP}/control?var={var}&val={val}",
+            timeout=2
+        )
+    except Exception as e:
+        print(f"[CTRL ERROR] {var}={val} — {e}")
+
+def configurar_camara():
+    if USE_WEBCAM or not CFG_CAMARA:
+        return
+    print("[CAM] Aplicando configuración inicial...")
+    for param, valor in CFG_CAMARA.items():
+        _ctrl(param, valor)
+    print("[CAM] Configuración aplicada.")
+
+def ajustar_exposicion(frame):
+    global _ae_level_actual, _frame_expo
+    if USE_WEBCAM or not _EXPO_ACTIVO:
+        return
+    _frame_expo += 1
+    if _frame_expo % _EXPO_INTERVALO != 0:
+        return
+    gris  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    media = float(gris.mean())
+    dif   = _BRILLO_OBJETIVO - media
+    if abs(dif) <= _ZONA_MUERTA:
+        return
+    nuevo = _ae_level_actual + (1 if dif > 0 else -1)
+    nuevo = max(-2, min(2, nuevo))
+    if nuevo == _ae_level_actual:
+        return
+    _ctrl("ae_level", nuevo)
+    print(f"[EXPO] media={media:.0f}  objetivo={_BRILLO_OBJETIVO}  ae_level={nuevo}")
+    _ae_level_actual = nuevo
 
 # ── MQTT ──────────────────────────────────────────────────────────
 MQTT_BROKER  = "localhost"
@@ -234,6 +282,7 @@ except Exception as e:
     print(f"[MQTT] No se pudo conectar: {e} — continuando sin sensores")
 
 # ── Loop principal ────────────────────────────────────────────────
+configurar_camara()
 print("Sistema de vigilancia iniciado. Ctrl+C para salir.")
 fps_anterior = time.time()
 
@@ -308,6 +357,7 @@ while True:
 
     # ── Decisión única de flash por frame ─────────────────────────
     set_flash(necesita_flash)
+    ajustar_exposicion(frame)
 
     fps = 1 / (time.time() - fps_anterior)
     fps_anterior = time.time()
