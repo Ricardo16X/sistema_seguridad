@@ -1,12 +1,27 @@
-# carpetas
+# ── Herramientas de desarrollo ────────────────────────────────────
 /gitflow
-/modulo_vision/evidencia
-/modulo_mq_test
-/modulo_vision/venv
-# archivos
 /gitflow_features.log
-/modulo_vision/yolov8n.pt
-/modulo_vision/yolov8n.onnx
-# secretos
+.vscode/
+*.code-workspace
+
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+modulo_vision/venv/
+
+# ── Modelos YOLO (binarios grandes) ───────────────────────────────
+modulo_vision/yolov8n.pt
+modulo_vision/yolov8n.onnx
+
+# ── Evidencia generada en runtime ─────────────────────────────────
+modulo_vision/evidencia/
+
+# ── Secretos ──────────────────────────────────────────────────────
 .env
 *.env
+
+# ── Módulos de prueba descartados ─────────────────────────────────
+/modulo_mq_test
