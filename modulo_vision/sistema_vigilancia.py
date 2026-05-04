@@ -167,7 +167,7 @@ def tomar_foto(frame, track_id, zona, nivel):
         print(f"[FOTO WEBCAM] {path}")
         return path
     try:
-        response = requests.get(f"http://{ESP32_CAM_IP}/capture", timeout=5)
+        response = requests.get(f"http://{ESP32_CAM_IP}/capture", timeout=15)
         if response.status_code == 200:
             with open(path, "wb") as f:
                 f.write(response.content)

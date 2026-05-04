@@ -120,6 +120,12 @@ esp_err_t captureHandler(httpd_req_t *req) {
   httpd_resp_send(req, (const char*)fb->buf, fb->len);
   esp_camera_fb_return(fb);
 
+  // Drenar frames acumulados durante la transferencia UXGA para evitar FB-OVF
+  camera_fb_t *drain;
+  while ((drain = esp_camera_fb_get()) != NULL) {
+    esp_camera_fb_return(drain);
+  }
+
   Serial.println("[CAPTURE] Foto tomada en UXGA");
   return ESP_OK;
 }
