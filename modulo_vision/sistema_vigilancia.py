@@ -6,6 +6,7 @@ import os
 import requests
 import json
 import threading
+import atexit
 import paho.mqtt.client as mqtt
 import notifier
 
@@ -159,6 +160,20 @@ def set_flash(encendido):
     flash_activo = encendido  # actualizar estado local antes del envío async
     print(f"[FLASH] {'ON' if encendido else 'OFF'}")
     _ctrl("flash", 1 if encendido else 0)
+
+def _apagar_flash_al_salir():
+    if USE_WEBCAM or not flash_activo:
+        return
+    try:
+        requests.get(
+            f"http://{ESP32_CAM_IP}/control?var=flash&val=0",
+            timeout=3
+        )
+        print("[FLASH] Apagado al salir")
+    except Exception:
+        pass
+
+atexit.register(_apagar_flash_al_salir)
 
 def tomar_foto(frame, track_id, zona, nivel):
     ts   = time.strftime("%Y%m%d_%H%M%S")
