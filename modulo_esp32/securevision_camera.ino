@@ -249,7 +249,12 @@ void setup() {
   startServer();
 
   // Watchdog por hardware — reinicia el ESP32 si el loop se cuelga > 30s
-  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+  const esp_task_wdt_config_t wdt_cfg = {
+    .timeout_ms    = WDT_TIMEOUT_S * 1000,
+    .idle_core_mask = 0,
+    .trigger_panic  = true
+  };
+  esp_task_wdt_reconfigure(&wdt_cfg);  // Arduino 3.x ya inicializa el WDT
   esp_task_wdt_add(NULL);
 
   Serial.println("──────────────────────────────────────────");
