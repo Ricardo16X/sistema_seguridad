@@ -3,6 +3,9 @@
 #include <WiFiManager.h>
 #include <ESPmDNS.h>
 #include "esp_http_server.h"
+#include "esp_task_wdt.h"
+
+#define WDT_TIMEOUT_S 30  // reinicia si el sistema se cuelga más de 30s
 
 // ── Configuración ─────────────────────────────────────────────────
 #define FLASH_PIN     4
@@ -245,6 +248,10 @@ void setup() {
 
   startServer();
 
+  // Watchdog por hardware — reinicia el ESP32 si el loop se cuelga > 30s
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+  esp_task_wdt_add(NULL);
+
   Serial.println("──────────────────────────────────────────");
   Serial.printf("Stream:   http://%s.local:81/stream\n",  DEVICE_NAME);
   Serial.printf("Capture:  http://%s.local/capture\n",    DEVICE_NAME);
@@ -254,8 +261,10 @@ void setup() {
   Serial.println("──────────────────────────────────────────");
 }
 
-// ── Loop — watchdog WiFi ──────────────────────────────────────────
+// ── Loop — watchdog WiFi + hardware WDT ──────────────────────────
 void loop() {
+  esp_task_wdt_reset();  // alimentar el watchdog de hardware
+
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WiFi] Conexión perdida — reiniciando");
     delay(1000);
