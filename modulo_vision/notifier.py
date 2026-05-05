@@ -13,35 +13,37 @@ def _validar():
         return False
     return True
 
-def enviar_texto(mensaje):
+def enviar_texto(mensaje, silencioso=False):
     if not _validar():
         return
     url = f"https://api.telegram.org/bot{_BOT_TOKEN}/sendMessage"
     try:
         r = requests.post(url, json={
-            "chat_id": _CHAT_ID,
-            "text": mensaje,
-            "parse_mode": "HTML"
+            "chat_id":              _CHAT_ID,
+            "text":                 mensaje,
+            "parse_mode":           "HTML",
+            "disable_notification": silencioso,
         }, timeout=5)
         if not r.ok:
             print(f"[NOTIFIER] Telegram error: {r.text}")
     except Exception as e:
         print(f"[NOTIFIER] Error enviando texto: {e}")
 
-def enviar_foto(foto_path, caption=""):
+def enviar_foto(foto_path, caption="", silencioso=False):
     if not _validar():
         return
     if not os.path.exists(foto_path):
         print(f"[NOTIFIER] Foto no encontrada: {foto_path}")
-        enviar_texto(caption)
+        enviar_texto(caption, silencioso=silencioso)
         return
     url = f"https://api.telegram.org/bot{_BOT_TOKEN}/sendPhoto"
     try:
         with open(foto_path, "rb") as f:
             r = requests.post(url, data={
-                "chat_id": _CHAT_ID,
-                "caption": caption,
-                "parse_mode": "HTML"
+                "chat_id":              _CHAT_ID,
+                "caption":              caption,
+                "parse_mode":           "HTML",
+                "disable_notification": str(silencioso).lower(),
             }, files={"photo": f}, timeout=10)
         if not r.ok:
             print(f"[NOTIFIER] Telegram error foto: {r.text}")

@@ -88,22 +88,27 @@ def ajustar_exposicion(frame):
 
 # ── MQTT ──────────────────────────────────────────────────────────
 MQTT_BROKER  = "localhost"
-MQTT_TOPICS  = ["securevision/pir", "securevision/vibracion", "securevision/sonido"]
+MQTT_TOPICS  = ["securevision/pir", "securevision/vibracion", "securevision/proximidad"]
 
 NOMBRES_SENSOR = {
-    "securevision/pir":       "PIR",
-    "securevision/vibracion": "Vibración",
-    "securevision/sonido":    "Sonido",
+    "securevision/pir":         "PIR",
+    "securevision/vibracion":   "Vibración",
+    "securevision/proximidad":  "Proximidad",
 }
 
 # ── Estado de fusión de alertas ───────────────────────────────────
 VENTANA_FUSION  = 60   # segundos — ventana para combinar visión + sensor
 COOLDOWN_SENSOR = 30   # segundos — mínimo entre alertas de sensor
 
-_lock              = threading.Lock()
-_ultima_vision     = {"ts": 0.0, "zona": None, "tid": None, "foto": None}
-_ultimo_sensor     = {"ts": 0.0, "activos": []}
-_ts_ultimo_envio   = 0.0   # controla cooldown de alertas de sensor
+_lock                = threading.Lock()
+_ultima_vision       = {"ts": 0.0, "zona": None, "tid": None, "foto": None}
+_ultimo_sensor       = {"ts": 0.0, "activos": []}
+_ts_ultimo_envio     = 0.0   # controla cooldown de alertas de sensor
+VENTANA_SENSORES     = 0.5   # segundos — ventana para acumular sensores simultáneos
+_sensores_pendientes = []
+_timer_sensor        = None
+VENTANA_REINCIDENCIA = 120   # segundos — ventana para detectar reincidencia
+_historial_combos    = {}    # {"combo": [ts1, ts2, ...]}
 
 # ── Umbrales de sospecha (segundos) ──────────────────────────────
 T_PREC_BAJA     = 5    # 0–5s  en precaucion → sospecha baja
@@ -128,8 +133,9 @@ ZONAS = {
 }
 
 # ── Estado por ID ─────────────────────────────────────────────────
-historial    = {}
-flash_activo = False  # flag global — una sola fuente de verdad del flash
+historial         = {}
+flash_activo      = False  # flag global — una sola fuente de verdad del flash
+_captura_activa   = False  # True mientras el hilo de alta resolución usa el flash
 
 def get_zona(punto):
     mejor = None
@@ -155,6 +161,9 @@ def set_flash(encendido):
     if USE_WEBCAM:
         return
     global flash_activo
+    # No apagar el flash si el hilo de captura de alta resolución lo está usando
+    if not encendido and _captura_activa:
+        return
     if encendido == flash_activo:
         return
     flash_activo = encendido  # actualizar estado local antes del envío async
@@ -185,7 +194,11 @@ def tomar_foto(frame, track_id, zona, nivel):
         return path
     # Intentar reemplazar con foto de mayor resolución del ESP32 en background
     def _fetch():
+        global _captura_activa
+        _captura_activa = True
         try:
+            requests.get(f"http://{ESP32_CAM_IP}/control?var=flash&val=1", timeout=2)
+            time.sleep(0.4)  # esperar a que el AEC se ajuste al flash
             r = requests.get(f"http://{ESP32_CAM_IP}/capture", timeout=15)
             if r.status_code == 200:
                 with open(path, "wb") as f:
@@ -193,6 +206,12 @@ def tomar_foto(frame, track_id, zona, nivel):
                 print(f"[FOTO ESP32-CAM] {path} actualizada en alta resolución")
         except Exception as e:
             print(f"[FOTO] ESP32 no disponible — usando frame local ({e})")
+        finally:
+            _captura_activa = False
+            try:
+                requests.get(f"http://{ESP32_CAM_IP}/control?var=flash&val=0", timeout=2)
+            except Exception:
+                pass
     threading.Thread(target=_fetch, daemon=True).start()
     return path
 
@@ -213,17 +232,47 @@ def _disparar_vision(tid, zona, foto):
     else:
         notifier.enviar_texto(caption)
 
-def _disparar_sensor(sensores):
-    hora = _hora()
+def _check_reincidencia(combo_key):
+    ahora     = time.time()
+    registros = _historial_combos.get(combo_key, [])
+    registros = [t for t in registros if ahora - t < VENTANA_REINCIDENCIA]
+    registros.append(ahora)
+    _historial_combos[combo_key] = registros
+    return len(registros) > 1
+
+def _determinar_nivel(sensores):
+    tiene_pir  = any("PIR"        in s for s in sensores)
+    tiene_vib  = any("Vibración"  in s for s in sensores)
+    tiene_prox = any("Proximidad" in s for s in sensores)
+
+    if tiene_prox and not tiene_pir and not tiene_vib:
+        return None          # proximidad sola → falso positivo
+
+    if tiene_prox:
+        return "CRITICO"     # proximidad + cualquier otro → máxima certeza
+
+    if tiene_pir and tiene_vib:
+        vib_primero = "Vibración" in sensores[0]
+        reincidente = _check_reincidencia("pir_vib")
+        return "ALTO" if (vib_primero or reincidente) else "MEDIO"
+
+    if tiene_vib:  return "MEDIO"
+    if tiene_pir:  return "BAJO"
+    return None
+
+def _disparar_sensor(sensores, nivel="MEDIO", silencioso=False):
+    hora  = _hora()
     lista = " · ".join(sensores)
+    iconos = {"MEDIO": "🟡", "ALTO": "🟠", "CRITICO": "🔴"}
     mensaje = (
-        f"📡 <b>SecureVision — Alerta de Sensor</b>\n\n"
-        f"🔴 <b>Sensor:</b> {lista}\n"
+        f"{iconos.get(nivel, '🔴')} <b>SecureVision — Alerta de Sensor</b>\n\n"
+        f"🔍 <b>Sensor:</b> {lista}\n"
+        f"⚡ <b>Nivel:</b> {nivel}\n"
         f"🕐 <b>Hora:</b> {hora}\n\n"
         f"<i>Revisa el panel para más detalles.</i>"
     )
-    print(f"[ALERTA SENSOR] {lista}")
-    notifier.enviar_texto(mensaje)
+    print(f"[ALERTA SENSOR] [{nivel}] {lista}")
+    notifier.enviar_texto(mensaje, silencioso=silencioso)
 
 def _disparar_combinada(tid, zona, foto, sensores):
     hora = _hora()
@@ -255,25 +304,67 @@ def disparar_alerta_vision(tid, zona, foto):
     else:
         _disparar_vision(tid, zona, foto)
 
-def _on_sensor_mqtt(topic, payload):
-    global _ts_ultimo_envio
-    if payload != "1":
-        return
-    ahora  = time.time()
-    nombre = NOMBRES_SENSOR.get(topic, topic)
+def _enviar_sensores_acumulados():
+    global _ts_ultimo_envio, _timer_sensor
     with _lock:
-        _ultimo_sensor.update({"ts": ahora, "activos": [nombre]})
-        vision_reciente = (ahora - _ultima_vision["ts"]) < VENTANA_FUSION
+        sensores      = list(_sensores_pendientes)
+        _sensores_pendientes.clear()
+        _timer_sensor = None
+        if not sensores:
+            return
+        ahora           = time.time()
         en_cooldown     = (ahora - _ts_ultimo_envio) < COOLDOWN_SENSOR
-    if en_cooldown:
-        print(f"[SENSOR] {nombre} — cooldown activo, ignorado")
+        vision_reciente = (ahora - _ultima_vision["ts"]) < VENTANA_FUSION
+        _ultimo_sensor.update({"ts": ahora, "activos": sensores})
+
+    # Determinar nivel antes de tocar el cooldown
+    nivel = _determinar_nivel(sensores)
+    if nivel is None:
+        print(f"[SENSOR] {sensores} — filtrado por tabla lógica")
         return
-    _ts_ultimo_envio = ahora
+    if nivel == "BAJO":
+        print(f"[SENSOR] {sensores} — nivel bajo, solo log")
+        return
+
+    # ALTO y CRITICO ignoran cooldown — MEDIO lo respeta
+    if en_cooldown and nivel == "MEDIO":
+        print(f"[SENSOR] {sensores} — cooldown activo, ignorado")
+        return
+
+    with _lock:
+        _ts_ultimo_envio = ahora
+
+    silencioso = nivel == "MEDIO"
+
     if vision_reciente:
         v = _ultima_vision
-        _disparar_combinada(v["tid"], v["zona"], v["foto"], [nombre])
+        _disparar_combinada(v["tid"], v["zona"], v["foto"], sensores)
     else:
-        _disparar_sensor([nombre])
+        _disparar_sensor(sensores, nivel=nivel, silencioso=silencioso)
+
+def _on_sensor_mqtt(topic, payload):
+    global _timer_sensor
+    nombre = NOMBRES_SENSOR.get(topic, topic)
+
+    if topic == "securevision/proximidad":
+        try:
+            dist_cm = float(payload)
+            nombre  = f"Proximidad ({dist_cm / 100:.2f}m)"
+        except ValueError:
+            return
+    elif payload != "1":
+        return
+
+    with _lock:
+        if nombre not in _sensores_pendientes:
+            _sensores_pendientes.append(nombre)
+        if _timer_sensor is None:
+            _timer_sensor = threading.Timer(VENTANA_SENSORES, _enviar_sensores_acumulados)
+            _timer_sensor.daemon = True
+            _timer_sensor.start()
+            print(f"[SENSOR] {nombre} — ventana abierta ({VENTANA_SENSORES}s)")
+        else:
+            print(f"[SENSOR] {nombre} — acumulado en ventana")
 
 # ── Cliente MQTT (corre en hilo propio) ───────────────────────────
 def _on_connect(client, userdata, flags, rc, props=None):
@@ -298,6 +389,23 @@ except Exception as e:
     print(f"[MQTT] No se pudo conectar: {e} — continuando sin sensores")
 
 # ── Loop principal ────────────────────────────────────────────────
+def _reconectar():
+    """Reabre el stream hasta lograrlo. Bloquea hasta que haya señal."""
+    global cap
+    cap.release()
+    fuente = 0 if USE_WEBCAM else f"http://{ESP32_CAM_IP}:{ESP32_CAM_STREAM}/stream"
+    intento = 0
+    while True:
+        intento += 1
+        print(f"[CAM] Reconectando... intento {intento}")
+        time.sleep(min(intento * 2, 30))  # back-off: 2s, 4s, 6s … tope 30s
+        cap = cv2.VideoCapture(fuente)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if cap.isOpened():
+            print("[CAM] Stream recuperado.")
+            configurar_camara()
+            return
+
 configurar_camara()
 print("Sistema de vigilancia iniciado. Ctrl+C para salir.")
 fps_anterior = time.time()
@@ -308,7 +416,12 @@ while True:
 
     ret, frame = cap.read()
     if not ret:
-        break
+        if USE_WEBCAM:
+            break  # webcam no tiene sentido reconectar
+        print("[CAM] Stream perdido.")
+        _reconectar()
+        fps_anterior = time.time()
+        continue
 
     results = model.track(frame, classes=[0], conf=0.65,
                           persist=True, verbose=False, imgsz=416)
@@ -350,6 +463,10 @@ while True:
             if zona == "PRECAUCION" and niv == 3 and not estado["foto_tomada"]:
                 estado["ultima_foto"] = tomar_foto(frame, tid, zona, niv)
                 estado["foto_tomada"] = True
+
+            if zona == "PRECAUCION" and niv == 3 and not estado["alerta_enviada"]:
+                disparar_alerta_vision(tid, zona, estado.get("ultima_foto"))
+                estado["alerta_enviada"] = True
 
             if zona == "CRITICO":
                 # 2s antes del umbral → marcar que necesita flash
