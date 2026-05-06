@@ -10,10 +10,10 @@
 #define DEVICE_ID     "esp32-sensores"
 
 // ── Pines ─────────────────────────────────────────────────────────
-#define PIN_PIR       13   // PIR HC-SR501  — salida digital
-#define PIN_VIBRACION 14   // SW-420        — salida digital
-#define PIN_TRIG      26   // HC-SR04       — disparo ultrasónico
-#define PIN_ECHO      25   // HC-SR04       — eco (5V → 3.3V con divisor)
+#define PIN_PIR       18   // PIR HC-SR501  — salida digital
+#define PIN_VIBRACION 19   // SW-420        — salida digital
+#define PIN_TRIG      22   // HC-SR04       — disparo ultrasónico
+#define PIN_ECHO      23   // HC-SR04       — eco (5V → 3.3V con divisor)
 
 // ── Proximidad ────────────────────────────────────────────────────
 #define DISTANCIA_UMBRAL_CM  100   // alerta si objeto a menos de esta distancia

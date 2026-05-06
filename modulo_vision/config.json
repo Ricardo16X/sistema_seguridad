@@ -2,8 +2,8 @@
   "esp32cam_ip": "securevision.local",
   "esp32cam_port_stream": 81,
   "esp32cam_port_control": 80,
-  "mostrar_video": false,
-  "use_webcam": true,
+  "mostrar_video": true,
+  "use_webcam": false,
 
   "camara_inicio": {
     "quality": 10,

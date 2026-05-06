@@ -25,3 +25,8 @@ modulo_vision/evidencia/
 
 # ── Módulos de prueba descartados ─────────────────────────────────
 /modulo_mq_test
+
+# ── Editor ────────────────────────────────────────────────────────
+*.kate-swp
+regla\ de\ construccion
+"regla de construccion"

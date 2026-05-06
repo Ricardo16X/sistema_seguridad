@@ -98,6 +98,7 @@ NOMBRES_SENSOR = {
 
 # ── Estado de fusión de alertas ───────────────────────────────────
 VENTANA_FUSION  = 60   # segundos — ventana para combinar visión + sensor
+VENTANA_FOTO    = 15   # segundos — máximo para adjuntar foto en alerta combinada
 COOLDOWN_SENSOR = 30   # segundos — mínimo entre alertas de sensor
 
 _lock                = threading.Lock()
@@ -337,8 +338,9 @@ def _enviar_sensores_acumulados():
     silencioso = nivel == "MEDIO"
 
     if vision_reciente:
-        v = _ultima_vision
-        _disparar_combinada(v["tid"], v["zona"], v["foto"], sensores)
+        v    = _ultima_vision
+        foto = v["foto"] if (ahora - v["ts"]) < VENTANA_FOTO else None
+        _disparar_combinada(v["tid"], v["zona"], foto, sensores)
     else:
         _disparar_sensor(sensores, nivel=nivel, silencioso=silencioso)
 
