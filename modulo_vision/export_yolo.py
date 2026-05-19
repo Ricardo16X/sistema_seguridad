@@ -5,8 +5,7 @@ import time
 import os
 
 
-
 model = YOLO("yolov8n.pt")
 
 # importar modelo onxx
-model.export(format="onnx", dynamic=True)
+model.export(format="openvino", dynamic=True)

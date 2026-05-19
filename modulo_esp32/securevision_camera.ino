@@ -4,11 +4,35 @@
 #include <ESPmDNS.h>
 #include "esp_http_server.h"
 #include "esp_task_wdt.h"
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 
 #define WDT_TIMEOUT_S 30  // reinicia si el sistema se cuelga más de 30s
 
 // ── Configuración ─────────────────────────────────────────────────
 #define FLASH_PIN     4
+#define SERVO_PIN     13  // SG90 — señal PWM
+
+// ── Servo (LEDC canal 2 — canal 0 reservado por la cámara) ────────
+#define SERVO_LEDC_CH   2
+#define SERVO_FREQ      50
+#define SERVO_RES       16
+#define SERVO_US_MIN    1000   // 1ms → 0°
+#define SERVO_US_MAX    2000   // 2ms → 180°
+#define SERVO_PERIODO   20000  // 20ms (50Hz)
+
+void initServo() {
+  ledcAttachChannel(SERVO_PIN, SERVO_FREQ, SERVO_RES, SERVO_LEDC_CH);
+  setServo(90);  // centrar al arrancar
+  Serial.println("[SERVO] Inicializado en 90°");
+}
+
+void setServo(int angulo) {
+  angulo = constrain(angulo, 0, 180);
+  uint32_t us   = map(angulo, 0, 180, SERVO_US_MIN, SERVO_US_MAX);
+  uint32_t duty = (uint32_t)((float)us / SERVO_PERIODO * 65535);
+  ledcWrite(SERVO_PIN, duty);
+}
 #define DEVICE_NAME   "securevision"   // → securevision.local
 #define AP_NAME       "SecureVision-Setup"
 #define AP_PASSWORD   "securevision123"
@@ -30,6 +54,14 @@
 #define VSYNC_GPIO_NUM    25
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
+
+// ── LED debug ─────────────────────────────────────────────────────
+void _blink(int veces, int ms_on, int ms_off) {
+  for (int i = 0; i < veces; i++) {
+    digitalWrite(FLASH_PIN, HIGH); delay(ms_on);
+    digitalWrite(FLASH_PIN, LOW);  delay(ms_off);
+  }
+}
 
 // ── Cámara ────────────────────────────────────────────────────────
 void initCamera() {
@@ -61,10 +93,16 @@ void initCamera() {
   config.fb_count     = 2;
   config.fb_location  = CAMERA_FB_IN_PSRAM;
 
-  if (esp_camera_init(&config) != ESP_OK) {
-    Serial.println("[ERROR] Camera init falló — reiniciando en 3s");
-    delay(3000);
-    ESP.restart();
+  for (int intento = 1; intento <= 5; intento++) {
+    if (esp_camera_init(&config) == ESP_OK) break;
+    Serial.printf("[ERROR] Camera init falló (intento %d/5)\n", intento);
+    _blink(3, 80, 80);
+    delay(2000);
+    if (intento == 5) {
+      Serial.println("[ERROR] Cámara no responde — reiniciando");
+      delay(500);
+      ESP.restart();
+    }
   }
 
   // Correr el stream en VGA — los buffers ya son suficientemente grandes
@@ -72,6 +110,9 @@ void initCamera() {
   s->set_framesize(s, FRAMESIZE_VGA);
   Serial.println("[OK] Cámara inicializada — buffers UXGA, stream VGA");
 }
+
+// Flag para coordinar stream y captura — evita race condition en buffers DMA
+volatile bool g_capture_busy = false;
 
 // ── Stream ────────────────────────────────────────────────────────
 #define PART_BOUNDARY "123456789000000000000987654321"
@@ -89,6 +130,9 @@ esp_err_t streamHandler(httpd_req_t *req) {
   httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
 
   while (true) {
+    // Pausar stream mientras captureHandler cambia el frame size
+    while (g_capture_busy) { vTaskDelay(pdMS_TO_TICKS(20)); }
+
     fb = esp_camera_fb_get();
     if (!fb) { res = ESP_FAIL; break; }
 
@@ -108,6 +152,7 @@ esp_err_t streamHandler(httpd_req_t *req) {
 
 // ── Capture ───────────────────────────────────────────────────────
 esp_err_t captureHandler(httpd_req_t *req) {
+  g_capture_busy = true;  // pausar stream — evitar acceso concurrente a la cámara
   sensor_t *s = esp_camera_sensor_get();
 
   s->set_framesize(s, FRAMESIZE_UXGA);
@@ -122,6 +167,8 @@ esp_err_t captureHandler(httpd_req_t *req) {
   camera_fb_t *fb = esp_camera_fb_get();
   s->set_framesize(s, FRAMESIZE_VGA);
   delay(200);  // dar tiempo al DMA para ajustarse de vuelta a VGA
+
+  g_capture_busy = false;  // reanudar stream
 
   if (!fb) { httpd_resp_send_500(req); return ESP_FAIL; }
 
@@ -160,6 +207,7 @@ esp_err_t controlHandler(httpd_req_t *req) {
   else if (!strcmp(var, "agc"))         s->set_gain_ctrl(s, ival);     // AGC on/off
   else if (!strcmp(var, "aec_value"))   s->set_aec_value(s, ival);     // exposición manual (0-1200)
   else if (!strcmp(var, "gainceiling")) s->set_gainceiling(s, (gainceiling_t)ival); // techo de ganancia
+  else if (!strcmp(var, "servo"))       setServo(ival);
   else if (!strcmp(var, "reset")) {
     WiFiManager wm;
     wm.resetSettings();
@@ -221,16 +269,26 @@ void startServer() {
 
 // ── Setup ─────────────────────────────────────────────────────────
 void setup() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);  // deshabilitar detector de brownout
+  delay(1000);  // esperar a que el riel de alimentación se estabilice
+
   Serial.begin(115200);
   pinMode(FLASH_PIN, OUTPUT);
   digitalWrite(FLASH_PIN, LOW);
 
+  _blink(5, 80, 80);   // boot iniciado
   initCamera();
+  initServo();
 
   WiFiManager wm;
   wm.setAPCallback([](WiFiManager *wm) {
     Serial.println("[WiFi] Modo AP activo — conéctate a: " AP_NAME);
     Serial.println("[WiFi] Abre: 192.168.4.1");
+    // Parpadeo lento continuo mientras espera configuración WiFi
+    while (WiFi.status() != WL_CONNECTED) {
+      digitalWrite(FLASH_PIN, HIGH); delay(400);
+      digitalWrite(FLASH_PIN, LOW);  delay(400);
+    }
   });
 
   if (!wm.autoConnect(AP_NAME, AP_PASSWORD)) {
@@ -238,6 +296,8 @@ void setup() {
     delay(3000);
     ESP.restart();
   }
+
+  _blink(3, 150, 150);  // WiFi conectado
 
   Serial.printf("[WiFi] Conectado — IP: %s\n", WiFi.localIP().toString().c_str());
 
@@ -276,5 +336,8 @@ void loop() {
     delay(1000);
     ESP.restart();
   }
-  delay(10000);
+
+  // Heartbeat — 1 pulso corto cada 4s: sistema operativo
+  _blink(1, 80, 0);
+  delay(4000);
 }

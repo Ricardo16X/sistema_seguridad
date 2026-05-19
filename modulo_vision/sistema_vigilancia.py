@@ -3,6 +3,8 @@ import cv2
 import numpy as np
 import time
 import os
+import sys
+import fcntl
 import requests
 import json
 import threading
@@ -10,7 +12,16 @@ import atexit
 import paho.mqtt.client as mqtt
 import notifier
 
-model = YOLO("yolov8n.onnx")
+# ── Instancia única — evita alertas duplicadas por doble ejecución ─
+_lockfile = open("/tmp/securevision.lock", "w")
+try:
+    fcntl.flock(_lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except IOError:
+    print("[ERROR] Ya hay una instancia corriendo. Usa: pkill -f sistema_vigilancia.py")
+    sys.exit(1)
+
+model = YOLO("yolov8n_openvino_model/", task="detect")
+# model = YOLO("yolov8n.onnx", task="detect")
 
 # Configuración desde archivo
 with open("config.json") as f:
@@ -28,12 +39,54 @@ if USE_WEBCAM:
     cap = cv2.VideoCapture(0)
 else:
     print(f"[CONFIG] IP: {ESP32_CAM_IP} | Stream: {ESP32_CAM_STREAM} | Control: {ESP32_CAM_CONTROL}")
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;8000000"  # 8s timeout
     cap = cv2.VideoCapture(f"http://{ESP32_CAM_IP}:{ESP32_CAM_STREAM}/stream")
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
 os.makedirs("evidencia", exist_ok=True)
+
+# ── Pan/Tilt ──────────────────────────────────────────────────────
+SERVO_MIN      = 10    # grados — límite izquierdo
+SERVO_MAX      = 170   # grados — límite derecho
+SERVO_PASO     = 2     # grados por step en sweep
+SERVO_INTERVAL = 0.40  # segundos entre steps de sweep
+SERVO_DEAD     = 3     # grados — no enviar si el cambio es menor
+
+_servo_angulo  = 90
+_servo_dir     = 1     # +1 derecha, -1 izquierda
+_servo_ultimo  = 0.0   # timestamp del último comando enviado
+
+# Worker dedicado — máximo 1 conexión HTTP de servo en vuelo a la vez
+_servo_pending = None
+_servo_cond    = threading.Condition()
+
+def _enviar_servo(angulo):
+    """Encola el ángulo; el worker envía solo el último valor pendiente."""
+    global _servo_pending
+    with _servo_cond:
+        _servo_pending = angulo
+        _servo_cond.notify()
+
+def _servo_worker():
+    global _servo_pending
+    while True:
+        with _servo_cond:
+            while _servo_pending is None:
+                _servo_cond.wait()
+            angulo = _servo_pending
+            _servo_pending = None
+        try:
+            requests.get(
+                f"http://{ESP32_CAM_IP}/control?var=servo&val={angulo}",
+                timeout=1
+            )
+        except Exception:
+            pass
+
+_t_servo = threading.Thread(target=_servo_worker, daemon=True)
+_t_servo.start()
 
 # ── Exposición automática ─────────────────────────────────────────
 _BRILLO_OBJETIVO  = CFG_EXPO.get("brillo_objetivo", 130)
@@ -58,12 +111,14 @@ def _ctrl(var, val):
             pass
     threading.Thread(target=_send, daemon=True).start()
 
-def configurar_camara():
+def configurar_camara(centrar_servo=False):
     if USE_WEBCAM or not CFG_CAMARA:
         return
     print("[CAM] Aplicando configuración inicial...")
     for param, valor in CFG_CAMARA.items():
         _ctrl(param, valor)
+    if centrar_servo:
+        _enviar_servo(90)
     print("[CAM] Configuración aplicada.")
 
 def ajustar_exposicion(frame):
@@ -111,6 +166,9 @@ _timer_sensor        = None
 VENTANA_REINCIDENCIA = 120   # segundos — ventana para detectar reincidencia
 _historial_combos    = {}    # {"combo": [ts1, ts2, ...]}
 
+DEBOUNCE_SENSOR   = 2.0      # segundos mínimos entre activaciones del mismo sensor
+_debounce_ts      = {}       # {topic: último timestamp procesado}
+
 # ── Umbrales de sospecha (segundos) ──────────────────────────────
 T_PREC_BAJA     = 5    # 0–5s  en precaucion → sospecha baja
 T_PREC_MEDIA    = 15   # 5–15s en precaucion → sospecha media
@@ -132,6 +190,45 @@ ZONAS = {
         "nivel": 3,
     },
 }
+
+_ZONA_COLOR = {
+    "SEGURO":     (34,  180,  34),   # verde
+    "PRECAUCION": (0,   165, 255),   # naranja
+    "CRITICO":    (0,     0, 220),   # rojo
+}
+
+def _dibujar_hud(frame, boxes_list, fps):
+    h, w = frame.shape[:2]
+
+    # Relleno semitransparente de zonas
+    overlay = frame.copy()
+    for nombre, z in ZONAS.items():
+        cv2.fillPoly(overlay, [z["puntos"]], _ZONA_COLOR[nombre])
+    cv2.addWeighted(overlay, 0.12, frame, 0.88, 0, frame)
+
+    # Bordes y etiquetas de zonas
+    etiqueta_y = {"SEGURO": int(h * 0.18), "PRECAUCION": int(h * 0.48), "CRITICO": int(h * 0.78)}
+    for nombre, z in ZONAS.items():
+        color = _ZONA_COLOR[nombre]
+        cv2.polylines(frame, [z["puntos"]], True, color, 2)
+        cv2.putText(frame, nombre, (w - 160, etiqueta_y[nombre]),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    # Bounding boxes coloreados según zona
+    for box in boxes_list:
+        x1, y1, x2, y2 = map(int, box)
+        zona = get_zona(((x1 + x2) // 2, y2))
+        color = _ZONA_COLOR.get(zona, (255, 255, 255))
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+    # Barra superior
+    cv2.rectangle(frame, (0, 0), (w, 38), (20, 20, 20), -1)
+    cv2.putText(frame, "SecureVision", (10, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+    cv2.putText(frame, time.strftime("%H:%M:%S"), (w // 2 - 50, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 1)
+    cv2.putText(frame, f"Personas: {len(boxes_list)}  FPS: {fps:.0f}", (w - 220, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1)
 
 # ── Estado por ID ─────────────────────────────────────────────────
 historial         = {}
@@ -346,6 +443,11 @@ def _enviar_sensores_acumulados():
 
 def _on_sensor_mqtt(topic, payload):
     global _timer_sensor
+    ahora = time.time()
+    if ahora - _debounce_ts.get(topic, 0) < DEBOUNCE_SENSOR:
+        return
+    _debounce_ts[topic] = ahora
+
     nombre = NOMBRES_SENSOR.get(topic, topic)
 
     if topic == "securevision/proximidad":
@@ -400,15 +502,16 @@ def _reconectar():
     while True:
         intento += 1
         print(f"[CAM] Reconectando... intento {intento}")
-        time.sleep(min(intento * 2, 30))  # back-off: 2s, 4s, 6s … tope 30s
+        if intento > 1:
+            time.sleep(min((intento - 1) * 2, 10))  # 0s, 2s, 4s… tope 10s
         cap = cv2.VideoCapture(fuente)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if cap.isOpened():
             print("[CAM] Stream recuperado.")
-            configurar_camara()
+            configurar_camara(centrar_servo=False)
             return
 
-configurar_camara()
+configurar_camara(centrar_servo=True)
 print("Sistema de vigilancia iniciado. Ctrl+C para salir.")
 fps_anterior = time.time()
 
@@ -426,7 +529,7 @@ while True:
         continue
 
     results = model.track(frame, classes=[0], conf=0.65,
-                          persist=True, verbose=False, imgsz=416)
+                          persist=True, verbose=False, imgsz=320)
 
     total          = 0
     necesita_flash = False  # se evalúa una vez por frame
@@ -494,14 +597,33 @@ while True:
     set_flash(necesita_flash)
     ajustar_exposicion(frame)
 
+    # ── Pan/Tilt ──────────────────────────────────────────────────
+    if not USE_WEBCAM and not _captura_activa:
+        ahora_servo = time.time()
+        ancho = frame.shape[1]
+        if total > 0:
+            cx = int((boxes[0][0] + boxes[0][2]) / 2)
+            objetivo = int(SERVO_MIN + (cx / ancho) * (SERVO_MAX - SERVO_MIN))
+            if abs(objetivo - _servo_angulo) > SERVO_DEAD and (ahora_servo - _servo_ultimo) >= SERVO_INTERVAL:
+                _servo_angulo = objetivo
+                _enviar_servo(_servo_angulo)
+                _servo_ultimo = ahora_servo
+        else:
+            if ahora_servo - _servo_ultimo >= SERVO_INTERVAL:
+                _servo_angulo += _servo_dir * SERVO_PASO
+                if _servo_angulo >= SERVO_MAX:
+                    _servo_angulo = SERVO_MAX
+                    _servo_dir = -1
+                elif _servo_angulo <= SERVO_MIN:
+                    _servo_angulo = SERVO_MIN
+                    _servo_dir = 1
+                _enviar_servo(_servo_angulo)
+                _servo_ultimo = ahora_servo
+
     fps = 1 / (time.time() - fps_anterior)
     fps_anterior = time.time()
     if MOSTRAR_VIDEO:
-        for box, tid in zip(boxes if total > 0 else [], ids if total > 0 else []):
-            x1, y1, x2, y2 = map(int, box)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, f"ID#{tid}", (x1, y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        _dibujar_hud(frame, boxes if total > 0 else [], fps)
         cv2.imshow("SecureVision", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
