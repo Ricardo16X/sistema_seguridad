@@ -1,32 +1,44 @@
+/**
+ * SecureVision — Módulo de Sensores (ESP32-DevKit)
+ *
+ * Sensores: PIR HC-SR501, Vibración SW-420, Ultrasonido HC-SR04
+ * Protocolo: MQTT sobre WiFi
+ *
+ * Diseño NO BLOQUEANTE: sin delay() en el loop principal.
+ * El HC-SR04 usa interrupción en el pin ECHO — nunca congela el CPU.
+ */
+
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
 
 // ── Configuración ─────────────────────────────────────────────────
-#define AP_NAME       "SecureVision-Sensores"
-#define AP_PASSWORD   "securevision123"
-#define MQTT_BROKER   "192.168.0.32"   // IP de la laptop (Fog)
-#define MQTT_PORT     1883
-#define DEVICE_ID     "esp32-sensores"
+#define AP_NAME     "SecureVision-Sensores"
+#define AP_PASSWORD "securevision123"
+#define MQTT_BROKER "192.168.0.32"
+#define MQTT_PORT   1883
+#define DEVICE_ID   "esp32-sensores"
 
 // ── Pines ─────────────────────────────────────────────────────────
-#define PIN_PIR       18   // PIR HC-SR501  — salida digital
-#define PIN_VIBRACION 19   // SW-420        — salida digital
-#define PIN_TRIG      22   // HC-SR04       — disparo ultrasónico
-#define PIN_ECHO      23   // HC-SR04       — eco (5V → 3.3V con divisor)
-
-// ── Proximidad ────────────────────────────────────────────────────
-#define DISTANCIA_UMBRAL_CM  100   // alerta si objeto a menos de esta distancia
+#define PIN_PIR       18
+#define PIN_VIBRACION 19
+#define PIN_TRIG      22
+#define PIN_ECHO      23
 
 // ── Topics MQTT ───────────────────────────────────────────────────
 #define TOPIC_PIR         "securevision/pir"
 #define TOPIC_VIBRACION   "securevision/vibracion"
 #define TOPIC_PROXIMIDAD  "securevision/proximidad"
 
-// ── Estado interno ────────────────────────────────────────────────
+// ── Umbrales ──────────────────────────────────────────────────────
+#define DISTANCIA_UMBRAL_CM  100   // alerta si objeto < 1 metro
+
+// ─────────────────────────────────────────────────────────────────
+// SENSORES DIGITALES (PIR + Vibración) — estructura con cooldown
+// ─────────────────────────────────────────────────────────────────
 struct Sensor {
-  uint8_t     pin;
-  const char* topic;
+  uint8_t      pin;
+  const char*  topic;
   unsigned long cooldown_ms;
   unsigned long ultimo_envio;
   bool          estado_anterior;
@@ -38,59 +50,152 @@ Sensor sensores[] = {
 };
 const int N_SENSORES = sizeof(sensores) / sizeof(sensores[0]);
 
-WiFiClient   wifiClient;
-PubSubClient mqtt(wifiClient);
+// ─────────────────────────────────────────────────────────────────
+// HC-SR04 — lógica NO BLOQUEANTE con interrupción en ECHO
+// ─────────────────────────────────────────────────────────────────
+volatile unsigned long _echo_inicio   = 0;
+volatile unsigned long _echo_fin      = 0;
+volatile bool          _echo_listo    = false;
 
-// ── Proximidad (HC-SR04) ──────────────────────────────────────────
-unsigned long _ultimo_proximidad = 0;
-#define COOLDOWN_PROXIMIDAD 5000  // ms entre alertas de proximidad
-
-float medir_distancia_cm() {
-  digitalWrite(PIN_TRIG, LOW);
-  delayMicroseconds(2);
-  digitalWrite(PIN_TRIG, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(PIN_TRIG, LOW);
-
-  long duracion = pulseIn(PIN_ECHO, HIGH, 30000);  // timeout 30ms (~5m)
-  if (duracion == 0) return -1;                     // sin eco — fuera de rango
-  return duracion * 0.034f / 2.0f;
+// ISR: captura tiempos de subida y bajada del pulso ECHO
+void IRAM_ATTR isr_echo() {
+  if (digitalRead(PIN_ECHO) == HIGH) {
+    _echo_inicio = micros();
+    _echo_listo  = false;
+  } else {
+    _echo_fin   = micros();
+    _echo_listo = true;
+  }
 }
 
-// ── WiFi ──────────────────────────────────────────────────────────
-void conectar_wifi() {
+// Máquina de estados del sonar
+enum EstadoSonar { SONAR_ESPERA, SONAR_LEER };
+EstadoSonar   _estado_sonar      = SONAR_ESPERA;
+unsigned long _t_sonar           = 0;
+unsigned long _ultimo_proximidad = 0;
+
+#define COOLDOWN_PROXIMIDAD_MS 5000   // ms entre alertas de proximidad
+#define SONAR_TIMEOUT_MS       30     // ms máximo esperando eco
+
+void actualizar_sonar(unsigned long ahora) {
+  switch (_estado_sonar) {
+
+    case SONAR_ESPERA:
+      if (ahora - _ultimo_proximidad >= COOLDOWN_PROXIMIDAD_MS) {
+        // Disparar pulso TRIG (12µs — negligible)
+        _echo_listo = false;
+        digitalWrite(PIN_TRIG, LOW);
+        delayMicroseconds(2);
+        digitalWrite(PIN_TRIG, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(PIN_TRIG, LOW);
+        _t_sonar      = ahora;
+        _estado_sonar = SONAR_LEER;
+      }
+      break;
+
+    case SONAR_LEER:
+      if (_echo_listo) {
+        // Eco recibido — calcular distancia
+        unsigned long dur = _echo_fin - _echo_inicio;
+        float dist = dur * 0.0343f / 2.0f;   // cm
+        if (dist > 0.0f && dist < DISTANCIA_UMBRAL_CM) {
+          char payload[10];
+          snprintf(payload, sizeof(payload), "%.1f", dist);
+          publicar(TOPIC_PROXIMIDAD, payload);
+          Serial.printf("[PROX] %.1f cm\n", dist);
+        }
+        _ultimo_proximidad = ahora;
+        _estado_sonar      = SONAR_ESPERA;
+
+      } else if (ahora - _t_sonar >= SONAR_TIMEOUT_MS) {
+        // Sin eco en 30ms → fuera de rango, evitar re-disparo inmediato
+        _ultimo_proximidad = ahora;
+        _estado_sonar      = SONAR_ESPERA;
+      }
+      break;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// WiFi — reconexión no bloqueante
+// ─────────────────────────────────────────────────────────────────
+unsigned long _t_wifi_perdida  = 0;
+unsigned long _t_wifi_intento  = 0;
+#define WIFI_RETRY_MS    10000    // cada 10s intenta reconectar
+#define WIFI_RESTART_MS  300000  // reinicia si lleva 5 min sin red
+
+void conectar_wifi_inicial() {
   WiFiManager wm;
-  wm.setAPCallback([](WiFiManager *wm) {
-    Serial.println("[WiFi] Modo AP activo — conéctate a: " AP_NAME);
+  wm.setAPCallback([](WiFiManager* wm) {
+    Serial.println("[WiFi] Modo AP — conéctate a: " AP_NAME);
     Serial.println("[WiFi] Abre: 192.168.4.1");
   });
   if (!wm.autoConnect(AP_NAME, AP_PASSWORD)) {
-    Serial.println("[ERROR] No se pudo conectar — reiniciando");
-    delay(3000);
+    Serial.println("[WiFi] Sin conexión inicial — reiniciando");
+    delay(2000);
     ESP.restart();
   }
   Serial.printf("[WiFi] Conectado — IP: %s\n", WiFi.localIP().toString().c_str());
 }
 
-// ── MQTT ──────────────────────────────────────────────────────────
-void conectar_mqtt() {
-  while (!mqtt.connected()) {
-    Serial.printf("[MQTT] Conectando a %s...", MQTT_BROKER);
-    if (mqtt.connect(DEVICE_ID)) {
-      Serial.println(" OK");
-    } else {
-      Serial.printf(" fallo rc=%d — reintento en 3s\n", mqtt.state());
-      delay(3000);
-    }
+// Devuelve true si WiFi está listo para usar
+bool verificar_wifi(unsigned long ahora) {
+  if (WiFi.status() == WL_CONNECTED) {
+    _t_wifi_perdida = 0;
+    return true;
   }
+  // Primera vez que se pierde
+  if (_t_wifi_perdida == 0) {
+    _t_wifi_perdida = ahora;
+    Serial.println("[WiFi] Conexión perdida — reconectando...");
+  }
+  // Reinicio de emergencia tras 5 minutos sin red
+  if (ahora - _t_wifi_perdida >= WIFI_RESTART_MS) {
+    Serial.println("[WiFi] 5 min sin red — reiniciando");
+    ESP.restart();
+  }
+  // Intento silencioso cada 10s
+  if (ahora - _t_wifi_intento >= WIFI_RETRY_MS) {
+    WiFi.reconnect();
+    _t_wifi_intento = ahora;
+  }
+  return false;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// MQTT — reconexión no bloqueante
+// ─────────────────────────────────────────────────────────────────
+WiFiClient   _wifiClient;
+PubSubClient mqtt(_wifiClient);
+
+unsigned long _t_mqtt_intento = 0;
+#define MQTT_RETRY_MS 5000
+
 void publicar(const char* topic, const char* payload) {
+  if (!mqtt.connected()) return;
   mqtt.publish(topic, payload);
   Serial.printf("[MQTT] %s → %s\n", topic, payload);
 }
 
-// ── Setup ─────────────────────────────────────────────────────────
+// Devuelve true si MQTT está listo para usar
+bool verificar_mqtt(unsigned long ahora) {
+  if (mqtt.connected()) return true;
+  if (ahora - _t_mqtt_intento >= MQTT_RETRY_MS) {
+    Serial.printf("[MQTT] Reconectando a %s...", MQTT_BROKER);
+    if (mqtt.connect(DEVICE_ID)) {
+      Serial.println(" OK");
+    } else {
+      Serial.printf(" fallo rc=%d\n", mqtt.state());
+    }
+    _t_mqtt_intento = ahora;
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Setup
+// ─────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
 
@@ -99,52 +204,46 @@ void setup() {
   pinMode(PIN_TRIG,      OUTPUT);
   pinMode(PIN_ECHO,      INPUT_PULLDOWN);
 
-  conectar_wifi();
+  // ISR para el ECHO del sonar
+  attachInterrupt(digitalPinToInterrupt(PIN_ECHO), isr_echo, CHANGE);
+
+  conectar_wifi_inicial();
+
   mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+  mqtt.setKeepAlive(30);
+
+  Serial.println("[OK] Sensores listos.");
 }
 
-// ── Loop ──────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+// Loop — completamente no bloqueante
+// ─────────────────────────────────────────────────────────────────
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WiFi] Conexión perdida — reconectando");
-    WiFi.reconnect();
-    unsigned long t = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t < 10000) delay(500);
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("[WiFi] Sin red — reiniciando");
-      ESP.restart();
-    }
-  }
-  if (!mqtt.connected()) conectar_mqtt();
-  mqtt.loop();
-
   unsigned long ahora = millis();
 
-  // ── PIR y vibración (flanco digital) ──────────────────────────
-  for (int i = 0; i < N_SENSORES; i++) {
-    Sensor& s      = sensores[i];
-    bool    activo = digitalRead(s.pin) == HIGH;
-    bool    flanco = activo && !s.estado_anterior;
-    bool    listo  = (ahora - s.ultimo_envio) >= s.cooldown_ms;
+  // Sin WiFi → esperar sin procesar
+  if (!verificar_wifi(ahora)) return;
 
-    if (flanco && listo) {
+  // Sin MQTT → intentar reconectar, seguir procesando sensores
+  bool mqtt_ok = verificar_mqtt(ahora);
+  if (mqtt_ok) mqtt.loop();
+
+  // ── PIR y Vibración — flanco de subida con cooldown ──────────
+  for (int i = 0; i < N_SENSORES; i++) {
+    Sensor& s     = sensores[i];
+    bool activo   = digitalRead(s.pin) == HIGH;
+    bool flanco   = activo && !s.estado_anterior;
+    bool listo    = (ahora - s.ultimo_envio) >= s.cooldown_ms;
+
+    if (flanco && listo && mqtt_ok) {
       publicar(s.topic, "1");
       s.ultimo_envio = ahora;
     }
     s.estado_anterior = activo;
   }
 
-  // ── Proximidad (HC-SR04) ───────────────────────────────────────
-  if (ahora - _ultimo_proximidad >= COOLDOWN_PROXIMIDAD) {
-    float dist = medir_distancia_cm();
-    if (dist > 0 && dist < DISTANCIA_UMBRAL_CM) {
-      Serial.printf("[PROX] %.1f cm — umbral %d cm\n", dist, DISTANCIA_UMBRAL_CM);
-      char payload[10];
-      snprintf(payload, sizeof(payload), "%.1f", dist);
-      publicar(TOPIC_PROXIMIDAD, payload);
-      _ultimo_proximidad = ahora;
-    }
+  // ── HC-SR04 — máquina de estados no bloqueante ────────────────
+  if (mqtt_ok) {
+    actualizar_sonar(ahora);
   }
-
-  delay(50);  // muestrea a 20 Hz
 }
