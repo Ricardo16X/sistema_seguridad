@@ -50,6 +50,13 @@ USE_WEBCAM    = config.get("use_webcam", False)
 CFG_CAMARA    = config.get("camara_inicio", {})
 CFG_EXPO      = config.get("exposicion_auto", {})
 
+_RUNTIME_CFG_PATH = "config_runtime.json"
+try:
+    with open(_RUNTIME_CFG_PATH) as _f:
+        _runtime_cfg = json.load(_f)
+except (FileNotFoundError, json.JSONDecodeError):
+    _runtime_cfg = {}
+
 os.makedirs("evidencia", exist_ok=True)
 
 # ── Queues entre hilos ────────────────────────────────────────────
@@ -126,6 +133,9 @@ def configurar_camara(centrar_servo=False):
     print("[CAM] Aplicando configuración...")
     for param, valor in CFG_CAMARA.items():
         _ctrl(param, valor)
+    if "ae_level" in _runtime_cfg:
+        _ctrl("ae_level", _runtime_cfg["ae_level"])
+        print(f"[CAM] Brillo restaurado → ae_level={_runtime_cfg['ae_level']}")
     if centrar_servo:
         _enviar_servo(90)
     print("[CAM] Listo.")
@@ -181,20 +191,16 @@ def _apagar_flash():
 # ─────────────────────────────────────────────────────────────────
 # ZONAS Y LÓGICA DE SOSPECHA
 # ─────────────────────────────────────────────────────────────────
-ZONAS = {
-    "SEGURO": {
-        "puntos": np.array([[0,0],[640,0],[640,155],[0,155]], np.int32),
-        "nivel":  1,
-    },
-    "PRECAUCION": {
-        "puntos": np.array([[0,150],[640,150],[640,320],[0,320]], np.int32),
-        "nivel":  2,
-    },
-    "CRITICO": {
-        "puntos": np.array([[0,315],[640,315],[640,480],[0,480]], np.int32),
-        "nivel":  3,
-    },
-}
+def _build_zonas(y1, y2):
+    return {
+        "SEGURO":     {"puntos": np.array([[0,0],[640,0],[640,y1],[0,y1]], np.int32), "nivel": 1},
+        "PRECAUCION": {"puntos": np.array([[0,y1-5],[640,y1-5],[640,y2],[0,y2]], np.int32), "nivel": 2},
+        "CRITICO":    {"puntos": np.array([[0,y2-5],[640,y2-5],[640,480],[0,480]], np.int32), "nivel": 3},
+    }
+
+_y1_init = _runtime_cfg.get("y_seguro",    155)
+_y2_init = _runtime_cfg.get("y_precaucion", 320)
+ZONAS = _build_zonas(_y1_init, _y2_init)
 _ZONA_COLOR = {
     "SEGURO":     ( 34, 180,  34),
     "PRECAUCION": (  0, 165, 255),
@@ -231,12 +237,13 @@ def _dibujar_hud(frame, boxes_list, fps):
     for nombre, z in ZONAS.items():
         cv2.fillPoly(overlay, [z["puntos"]], _ZONA_COLOR[nombre])
     cv2.addWeighted(overlay, 0.12, frame, 0.88, 0, frame)
-    # Bordes y etiquetas
-    ety = {"SEGURO": int(h*0.18), "PRECAUCION": int(h*0.48), "CRITICO": int(h*0.78)}
+    # Bordes y etiquetas (posición Y = centro vertical de cada zona)
     for nombre, z in ZONAS.items():
         color = _ZONA_COLOR[nombre]
         cv2.polylines(frame, [z["puntos"]], True, color, 2)
-        cv2.putText(frame, nombre, (w-160, ety[nombre]),
+        pts  = z["puntos"]
+        cy   = int((pts[:, 1].min() + pts[:, 1].max()) / 2)
+        cv2.putText(frame, nombre, (w-160, max(cy, 20)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     # Bounding boxes
     for box in boxes_list:
@@ -396,16 +403,20 @@ def _enviar_sensores_acumulados():
             f"📡 <b>Sensores:</b> {lista}\n"
             f"🕐 <b>Hora:</b> {hora}"
         )
-        tarea = {"tipo": "foto", "path": foto, "caption": caption, "silencioso": silencioso,
-                 "tipo_evento": "combinado", "zona": v["zona"], "nivel": nivel} \
-                if foto else {"tipo": "texto", "mensaje": caption, "silencioso": silencioso,
-                              "tipo_evento": "combinado", "zona": v["zona"], "nivel": nivel}
+        msg_cloud = f"ID#{v['tid']} + {lista}"
+        tarea = {"tipo": "foto", "path": foto, "caption": caption, "mensaje": msg_cloud,
+                 "silencioso": silencioso, "tipo_evento": "combinado",
+                 "zona": v["zona"], "nivel": nivel} \
+                if foto else {"tipo": "texto", "mensaje": caption, "mensaje_cloud": msg_cloud,
+                              "silencioso": silencioso, "tipo_evento": "combinado",
+                              "zona": v["zona"], "nivel": nivel}
     else:
         tarea = {
             "tipo": "texto",
             "silencioso": silencioso,
             "tipo_evento": "sensor",
             "nivel": nivel,
+            "mensaje_cloud": f"Sensores: {lista}",
             "mensaje": (
                 f"{iconos.get(nivel,'🔴')} <b>SecureVision — Alerta de Sensor</b>\n\n"
                 f"🔍 <b>Sensor:</b> {lista}\n"
@@ -636,28 +647,37 @@ def hilo_inferencia():
 # ─────────────────────────────────────────────────────────────────
 # HILO 4 — COMANDOS REMOTOS (polling cloud cada 3s)
 # ─────────────────────────────────────────────────────────────────
+def _guardar_runtime():
+    try:
+        y1 = int(ZONAS["SEGURO"]["puntos"][2][1])
+        y2 = int(ZONAS["PRECAUCION"]["puntos"][2][1])
+        with open(_RUNTIME_CFG_PATH, "w") as f:
+            json.dump({"ae_level": _runtime_cfg.get("ae_level", 0),
+                       "y_seguro": y1, "y_precaucion": y2}, f)
+    except Exception:
+        pass
+
 def _aplicar_comando(cmd):
     global ZONAS
     tipo    = cmd.get("tipo")
     payload = cmd.get("payload", {})
     if tipo == "brillo":
-        nivel = int(payload.get("ae_level", 0))
-        _ctrl("ae_level", max(-2, min(2, nivel)))
+        nivel = max(-2, min(2, int(payload.get("ae_level", 0))))
+        _ctrl("ae_level", nivel)
+        _runtime_cfg["ae_level"] = nivel
+        _guardar_runtime()
         print(f"[CMD] Brillo → ae_level={nivel}")
     elif tipo == "zonas":
         y1 = int(payload.get("y_seguro",    155))
         y2 = int(payload.get("y_precaucion", 320))
         y1 = max(50,  min(y1, 380))
         y2 = max(y1 + 50, min(y2, 460))
-        ZONAS = {
-            "SEGURO":     {"puntos": np.array([[0,0],[640,0],[640,y1],[0,y1]], np.int32), "nivel": 1},
-            "PRECAUCION": {"puntos": np.array([[0,y1-5],[640,y1-5],[640,y2],[0,y2]], np.int32), "nivel": 2},
-            "CRITICO":    {"puntos": np.array([[0,y2-5],[640,y2-5],[640,480],[0,480]], np.int32), "nivel": 3},
-        }
+        ZONAS = _build_zonas(y1, y2)
+        _guardar_runtime()
         print(f"[CMD] Zonas → SEGURO 0-{y1} | PRECAUCION {y1}-{y2} | CRITICO {y2}-480")
 
 def hilo_comandos():
-    _api = os.getenv("CLOUD_API_URL", "").rstrip("/")
+    _api = (config.get("cloud_api_url") or os.getenv("CLOUD_API_URL", "")).rstrip("/")
     if not _api:
         return
     while _corriendo:
@@ -685,7 +705,7 @@ def hilo_comunicaciones():
                 tipo       = tarea.get("tipo_evento", "sensor"),
                 zona       = tarea.get("zona"),
                 nivel      = tarea.get("nivel"),
-                mensaje    = tarea.get("mensaje", "")[:300],
+                mensaje    = tarea.get("mensaje_cloud", tarea.get("mensaje", ""))[:300],
             )
         elif tipo == "foto":
             frame_data = tarea.get("frame")
