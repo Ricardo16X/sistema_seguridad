@@ -18,6 +18,7 @@ modulo_vision/yolov8n.onnx
 
 # ── Evidencia generada en runtime ─────────────────────────────────
 modulo_vision/evidencia/
+modulo_vision/config_runtime.json
 
 # ── Secretos ──────────────────────────────────────────────────────
 .env
