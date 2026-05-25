@@ -55,7 +55,7 @@ eventos = get_eventos(cliente_id)
 online = len(eventos) > 0 and (
     datetime.now(timezone.utc) -
     datetime.fromisoformat(eventos[0]["created_at"].replace("Z", "+00:00"))
-).total_seconds() < 120   # online si hay evento en los últimos 2 minutos
+).total_seconds() < 3600   # online si hay evento en la última hora
 
 # ── Header ────────────────────────────────────────────────────────
 col_title, col_status = st.columns([4, 1])
