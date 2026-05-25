@@ -20,6 +20,7 @@ import threading
 import atexit
 import paho.mqtt.client as mqtt
 import notifier
+import cloud_client
 
 # ── Instancia única — evita alertas duplicadas ────────────────────
 _lockfile = open("/tmp/securevision.lock", "w")
@@ -41,6 +42,7 @@ model = YOLO("yolov8n.onnx", task="detect")
 with open("config.json") as f:
     config = json.load(f)
 
+CLIENTE_ID    = config.get("cliente_id", "default")
 ESP32_CAM_IP  = config.get("esp32cam_ip")
 ESP32_STREAM  = config.get("esp32cam_port_stream")
 MOSTRAR_VIDEO = config.get("mostrar_video", False)
@@ -291,9 +293,10 @@ def disparar_alerta_vision(tid, zona, frame):
             f"🕐 <b>Hora:</b> {hora}"
         )
 
-    # Pasar copia del frame — hilo_comunicaciones hará el imwrite
+    tipo_evento = "combinado" if sensores_recientes else "vision"
     _alert_q.put({"tipo": "foto", "frame": frame.copy(), "path": path,
-                  "caption": caption, "silencioso": False})
+                  "caption": caption, "silencioso": False,
+                  "tipo_evento": tipo_evento, "zona": zona, "nivel": zona})
     print(f"[ALERTA VISION] {zona} ID#{tid}")
 
 # ─────────────────────────────────────────────────────────────────
@@ -386,12 +389,16 @@ def _enviar_sensores_acumulados():
             f"📡 <b>Sensores:</b> {lista}\n"
             f"🕐 <b>Hora:</b> {hora}"
         )
-        tarea = {"tipo": "foto", "path": foto, "caption": caption, "silencioso": silencioso} \
-                if foto else {"tipo": "texto", "mensaje": caption, "silencioso": silencioso}
+        tarea = {"tipo": "foto", "path": foto, "caption": caption, "silencioso": silencioso,
+                 "tipo_evento": "combinado", "zona": v["zona"], "nivel": nivel} \
+                if foto else {"tipo": "texto", "mensaje": caption, "silencioso": silencioso,
+                              "tipo_evento": "combinado", "zona": v["zona"], "nivel": nivel}
     else:
         tarea = {
             "tipo": "texto",
             "silencioso": silencioso,
+            "tipo_evento": "sensor",
+            "nivel": nivel,
             "mensaje": (
                 f"{iconos.get(nivel,'🔴')} <b>SecureVision — Alerta de Sensor</b>\n\n"
                 f"🔍 <b>Sensor:</b> {lista}\n"
@@ -629,6 +636,13 @@ def hilo_comunicaciones():
         if tipo == "texto":
             notifier.enviar_texto(tarea["mensaje"],
                                   silencioso=tarea.get("silencioso", False))
+            cloud_client.registrar_evento(
+                cliente_id = CLIENTE_ID,
+                tipo       = tarea.get("tipo_evento", "sensor"),
+                zona       = tarea.get("zona"),
+                nivel      = tarea.get("nivel"),
+                mensaje    = tarea.get("mensaje", "")[:300],
+            )
         elif tipo == "foto":
             frame_data = tarea.get("frame")
             path       = tarea.get("path", "")
@@ -637,6 +651,13 @@ def hilo_comunicaciones():
             notifier.enviar_foto(path,
                                  tarea.get("caption", ""),
                                  silencioso=tarea.get("silencioso", False))
+            cloud_client.registrar_evento(
+                cliente_id = CLIENTE_ID,
+                tipo       = tarea.get("tipo_evento", "vision"),
+                zona       = tarea.get("zona"),
+                nivel      = tarea.get("nivel"),
+                mensaje    = tarea.get("caption", "")[:300],
+            )
         _alert_q.task_done()
 
 # ─────────────────────────────────────────────────────────────────

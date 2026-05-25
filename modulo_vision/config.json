@@ -1,4 +1,5 @@
 {
+  "cliente_id": "00f0374a-ff6f-4117-8da4-9c3fd6df2cac",
   "esp32cam_ip": "securevision.local",
   "esp32cam_port_stream": 81,
   "esp32cam_port_control": 80,
