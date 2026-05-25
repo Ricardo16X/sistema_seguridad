@@ -62,4 +62,4 @@ echo -e "  ?cliente=00f0374a-ff6f-4117-8da4-9c3fd6df2cac${RESET}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
 
 cd "$VISION_DIR"
-exec "$PYTHON" sistema_vigilancia.py
+exec "$PYTHON" -u sistema_vigilancia.py
