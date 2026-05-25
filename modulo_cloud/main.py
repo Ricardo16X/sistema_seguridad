@@ -35,11 +35,11 @@ app.add_middleware(
 # ── Modelos ───────────────────────────────────────────────────────
 class EventoIn(BaseModel):
     cliente_id: str
-    tipo:       str             # 'vision' | 'sensor' | 'combinado'
-    zona:       Optional[str]   # 'SEGURO' | 'PRECAUCION' | 'CRITICO'
-    nivel:      Optional[str]   # 'BAJO' | 'MEDIO' | 'ALTO' | 'CRITICO'
-    mensaje:    Optional[str]
-    foto_url:   Optional[str]
+    tipo:       str                  # 'vision' | 'sensor' | 'combinado'
+    zona:       Optional[str] = None # 'SEGURO' | 'PRECAUCION' | 'CRITICO'
+    nivel:      Optional[str] = None # 'BAJO' | 'MEDIO' | 'ALTO' | 'CRITICO'
+    mensaje:    Optional[str] = None
+    foto_url:   Optional[str] = None
 
 
 # ── Helpers Supabase ──────────────────────────────────────────────
