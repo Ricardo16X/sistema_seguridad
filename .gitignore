@@ -30,3 +30,5 @@ modulo_vision/evidencia/
 *.kate-swp
 regla\ de\ construccion
 "regla de construccion"
+
+.mcp.json
