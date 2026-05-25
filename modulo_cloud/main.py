@@ -5,7 +5,7 @@ FastAPI + Supabase · desplegado en Railway
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Any
 from collections import Counter
 import os
 import requests
@@ -113,3 +113,36 @@ def estadisticas(cliente_id: str):
         "por_zona":  dict(Counter(r["zona"]  for r in rows if r.get("zona"))),
         "por_nivel": dict(Counter(r["nivel"] for r in rows if r.get("nivel"))),
     }
+
+
+# ── Comandos remotos ──────────────────────────────────────────────
+class ComandoIn(BaseModel):
+    cliente_id: str
+    tipo:       str          # 'brillo' | 'zonas'
+    payload:    dict[str, Any]
+
+@app.post("/comando", status_code=201)
+def enviar_comando(cmd: ComandoIn):
+    """Dashboard → fog layer: ajustar brillo o límites de zonas."""
+    _sb_post("comandos", cmd.model_dump())
+    return {"ok": True}
+
+@app.get("/comandos/{cliente_id}/pendientes")
+def obtener_pendientes(cliente_id: str):
+    """Fog layer polling: devuelve comandos no ejecutados y los marca."""
+    rows = _sb_get("comandos", {
+        "cliente_id": f"eq.{cliente_id}",
+        "ejecutado":  "eq.false",
+        "order":      "created_at.asc",
+        "limit":      10,
+    })
+    if rows:
+        ids = ",".join(r["id"] for r in rows)
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/comandos",
+            json={"ejecutado": True},
+            params={"id": f"in.({ids})"},
+            headers=_SB_HEADERS,
+            timeout=5,
+        )
+    return rows

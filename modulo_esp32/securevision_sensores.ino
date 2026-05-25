@@ -11,13 +11,14 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
+#include <ESPmDNS.h>
 
 // ── Configuración ─────────────────────────────────────────────────
-#define AP_NAME     "SecureVision-Sensores"
-#define AP_PASSWORD "securevision123"
-#define MQTT_BROKER "192.168.0.32"
-#define MQTT_PORT   1883
-#define DEVICE_ID   "esp32-sensores"
+#define AP_NAME        "SecureVision-Sensores"
+#define AP_PASSWORD    "securevision123"
+#define MQTT_BROKER    "fedora.local"   // mDNS — funciona sin IP fija
+#define MQTT_PORT      1883
+#define DEVICE_ID      "esp32-sensores"
 
 // ── Pines ─────────────────────────────────────────────────────────
 #define PIN_PIR       18
@@ -120,10 +121,31 @@ void actualizar_sonar(unsigned long ahora) {
 // ─────────────────────────────────────────────────────────────────
 // WiFi — reconexión no bloqueante
 // ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+// MQTT — declaración adelantada para que resolver_broker() pueda usarla
+// ─────────────────────────────────────────────────────────────────
+WiFiClient   _wifiClient;
+PubSubClient mqtt(_wifiClient);
+
+// ─────────────────────────────────────────────────────────────────
+// WiFi — reconexión no bloqueante
+// ─────────────────────────────────────────────────────────────────
 unsigned long _t_wifi_perdida  = 0;
 unsigned long _t_wifi_intento  = 0;
 #define WIFI_RETRY_MS    10000    // cada 10s intenta reconectar
 #define WIFI_RESTART_MS  300000  // reinicia si lleva 5 min sin red
+
+IPAddress _broker_ip;
+
+void resolver_broker() {
+  Serial.printf("[mDNS] Resolviendo %s...", MQTT_BROKER);
+  if (WiFi.hostByName(MQTT_BROKER, _broker_ip)) {
+    Serial.printf(" OK → %s\n", _broker_ip.toString().c_str());
+    mqtt.setServer(_broker_ip, MQTT_PORT);
+  } else {
+    Serial.println(" fallo — se usará última IP conocida");
+  }
+}
 
 void conectar_wifi_inicial() {
   WiFiManager wm;
@@ -137,6 +159,8 @@ void conectar_wifi_inicial() {
     ESP.restart();
   }
   Serial.printf("[WiFi] Conectado — IP: %s\n", WiFi.localIP().toString().c_str());
+  MDNS.begin("esp32-sensores");
+  resolver_broker();
 }
 
 // Devuelve true si WiFi está listo para usar
@@ -163,14 +187,10 @@ bool verificar_wifi(unsigned long ahora) {
   return false;
 }
 
-// ─────────────────────────────────────────────────────────────────
-// MQTT — reconexión no bloqueante
-// ─────────────────────────────────────────────────────────────────
-WiFiClient   _wifiClient;
-PubSubClient mqtt(_wifiClient);
-
-unsigned long _t_mqtt_intento = 0;
-#define MQTT_RETRY_MS 5000
+unsigned long _t_mqtt_intento  = 0;
+int           _mqtt_fallos      = 0;
+#define MQTT_RETRY_MS  5000
+#define MQTT_RERESOLVER 5   // re-resolver mDNS cada N fallos consecutivos
 
 void publicar(const char* topic, const char* payload) {
   if (!mqtt.connected()) return;
@@ -180,13 +200,19 @@ void publicar(const char* topic, const char* payload) {
 
 // Devuelve true si MQTT está listo para usar
 bool verificar_mqtt(unsigned long ahora) {
-  if (mqtt.connected()) return true;
+  if (mqtt.connected()) { _mqtt_fallos = 0; return true; }
   if (ahora - _t_mqtt_intento >= MQTT_RETRY_MS) {
-    Serial.printf("[MQTT] Reconectando a %s...", MQTT_BROKER);
+    // Re-resolver mDNS cada N fallos por si la IP del laptop cambió
+    if (_mqtt_fallos > 0 && _mqtt_fallos % MQTT_RERESOLVER == 0) {
+      resolver_broker();
+    }
+    Serial.printf("[MQTT] Reconectando a %s...", _broker_ip.toString().c_str());
     if (mqtt.connect(DEVICE_ID)) {
       Serial.println(" OK");
+      _mqtt_fallos = 0;
     } else {
       Serial.printf(" fallo rc=%d\n", mqtt.state());
+      _mqtt_fallos++;
     }
     _t_mqtt_intento = ahora;
   }
@@ -207,9 +233,8 @@ void setup() {
   // ISR para el ECHO del sonar
   attachInterrupt(digitalPinToInterrupt(PIN_ECHO), isr_echo, CHANGE);
 
-  conectar_wifi_inicial();
+  conectar_wifi_inicial();   // incluye MDNS.begin + resolver_broker
 
-  mqtt.setServer(MQTT_BROKER, MQTT_PORT);
   mqtt.setKeepAlive(30);
 
   Serial.println("[OK] Sensores listos.");

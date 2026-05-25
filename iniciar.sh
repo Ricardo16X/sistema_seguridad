@@ -28,7 +28,7 @@ if systemctl is-active --quiet mosquitto 2>/dev/null; then
     ok "Mosquitto ya está corriendo"
 else
     info "Iniciando Mosquitto..."
-    sudo systemctl start mosquitto 2>/dev/null || mosquitto -d 2>/dev/null
+    sudo systemctl start mosquitto 2>/dev/null || mosquitto -d -c /etc/mosquitto/mosquitto.conf 2>/dev/null
     sleep 1
     if systemctl is-active --quiet mosquitto 2>/dev/null || pgrep -x mosquitto > /dev/null; then
         ok "Mosquitto iniciado"

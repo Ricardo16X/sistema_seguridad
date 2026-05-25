@@ -183,15 +183,15 @@ def _apagar_flash():
 # ─────────────────────────────────────────────────────────────────
 ZONAS = {
     "SEGURO": {
-        "puntos": np.array([[50,30],[1230,30],[1230,250],[50,250]], np.int32),
+        "puntos": np.array([[0,0],[640,0],[640,155],[0,155]], np.int32),
         "nivel":  1,
     },
     "PRECAUCION": {
-        "puntos": np.array([[50,230],[1230,230],[1230,480],[50,480]], np.int32),
+        "puntos": np.array([[0,150],[640,150],[640,320],[0,320]], np.int32),
         "nivel":  2,
     },
     "CRITICO": {
-        "puntos": np.array([[50,460],[1230,460],[1230,715],[50,715]], np.int32),
+        "puntos": np.array([[0,315],[640,315],[640,480],[0,480]], np.int32),
         "nivel":  3,
     },
 }
@@ -293,10 +293,17 @@ def disparar_alerta_vision(tid, zona, frame):
             f"🕐 <b>Hora:</b> {hora}"
         )
 
-    tipo_evento = "combinado" if sensores_recientes else "vision"
+    tipo_evento  = "combinado" if sensores_recientes else "vision"
+    nivel_evento = "CRITICO" if zona == "CRITICO" else "ALTO"
+    if sensores_recientes:
+        lista = " + ".join(_ultimo_sensor["activos"])
+        mensaje_cloud = f"ID#{tid} — {lista}"
+    else:
+        mensaje_cloud = f"ID#{tid} detectado"
     _alert_q.put({"tipo": "foto", "frame": frame.copy(), "path": path,
                   "caption": caption, "silencioso": False,
-                  "tipo_evento": tipo_evento, "zona": zona, "nivel": zona})
+                  "tipo_evento": tipo_evento, "zona": zona, "nivel": nivel_evento,
+                  "mensaje": mensaje_cloud})
     print(f"[ALERTA VISION] {zona} ID#{tid}")
 
 # ─────────────────────────────────────────────────────────────────
@@ -626,6 +633,43 @@ def hilo_inferencia():
 # ─────────────────────────────────────────────────────────────────
 # HILO 3 — COMUNICACIONES (Telegram — no bloquea el video)
 # ─────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# HILO 4 — COMANDOS REMOTOS (polling cloud cada 3s)
+# ─────────────────────────────────────────────────────────────────
+def _aplicar_comando(cmd):
+    global ZONAS
+    tipo    = cmd.get("tipo")
+    payload = cmd.get("payload", {})
+    if tipo == "brillo":
+        nivel = int(payload.get("ae_level", 0))
+        _ctrl("ae_level", max(-2, min(2, nivel)))
+        print(f"[CMD] Brillo → ae_level={nivel}")
+    elif tipo == "zonas":
+        y1 = int(payload.get("y_seguro",    155))
+        y2 = int(payload.get("y_precaucion", 320))
+        y1 = max(50,  min(y1, 380))
+        y2 = max(y1 + 50, min(y2, 460))
+        ZONAS = {
+            "SEGURO":     {"puntos": np.array([[0,0],[640,0],[640,y1],[0,y1]], np.int32), "nivel": 1},
+            "PRECAUCION": {"puntos": np.array([[0,y1-5],[640,y1-5],[640,y2],[0,y2]], np.int32), "nivel": 2},
+            "CRITICO":    {"puntos": np.array([[0,y2-5],[640,y2-5],[640,480],[0,480]], np.int32), "nivel": 3},
+        }
+        print(f"[CMD] Zonas → SEGURO 0-{y1} | PRECAUCION {y1}-{y2} | CRITICO {y2}-480")
+
+def hilo_comandos():
+    _api = os.getenv("CLOUD_API_URL", "").rstrip("/")
+    if not _api:
+        return
+    while _corriendo:
+        try:
+            r = requests.get(f"{_api}/comandos/{CLIENTE_ID}/pendientes", timeout=5)
+            if r.ok:
+                for cmd in r.json():
+                    _aplicar_comando(cmd)
+        except Exception:
+            pass
+        time.sleep(3)
+
 def hilo_comunicaciones():
     while _corriendo:
         try:
@@ -656,7 +700,7 @@ def hilo_comunicaciones():
                 tipo       = tarea.get("tipo_evento", "vision"),
                 zona       = tarea.get("zona"),
                 nivel      = tarea.get("nivel"),
-                mensaje    = tarea.get("caption", "")[:300],
+                mensaje    = tarea.get("mensaje", tarea.get("caption", ""))[:300],
             )
         _alert_q.task_done()
 
@@ -670,6 +714,7 @@ _hilos = [
     threading.Thread(target=hilo_inferencia,     daemon=True, name="Inferencia"),
     threading.Thread(target=hilo_comunicaciones, daemon=True, name="Comunicaciones"),
     threading.Thread(target=_servo_worker,       daemon=True, name="Servo"),
+    threading.Thread(target=hilo_comandos,       daemon=True, name="Comandos"),
 ]
 for h in _hilos:
     h.start()
