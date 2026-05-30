@@ -9,7 +9,7 @@ RESET='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VISION_DIR="$SCRIPT_DIR/modulo_vision"
-PYTHON="/mnt/proyectos/Detector YOLO/venv/bin/python3"
+PYTHON="/home/ricardo16x/Documents/UMG/Proyectos/Detector YOLO/venv/bin/python3"
 
 ok()   { echo -e "${VERDE}  ✓ $1${RESET}"; }
 fail() { echo -e "${ROJO}  ✗ $1${RESET}"; exit 1; }
